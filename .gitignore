@@ -1,0 +1,19 @@
+# Experiment outputs
+results/
+slurm/
+logs/
+*.pt
+*.out
+*.err
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
