@@ -123,9 +123,7 @@ SNTE ranks first on all 15 split–dataset combinations and has 1.61M parameters
 
 `config.py` holds the final hyperparameters: SNTE uses `embed_dim=256`,
 `dropout=0.5`, and AdamW with learning rate `1e-3`, weight decay `1e-2`,
-50 epochs, batch size 64 and early-stopping patience 10. The baselines are
-tuned toward their natural operating point under the same protocol, so the
-comparison isolates the match head and encoder.
+50 epochs, batch size 64 and early-stopping patience 10. 
 
 The architecture switches in `main.py` (`--head`, `--no-standardize`,
 `--neural-encoder`, `--speech-encoder`, `--tied-encoder`,
