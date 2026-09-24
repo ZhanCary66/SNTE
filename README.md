@@ -146,7 +146,7 @@ numbers, so a rerun with the same seed reproduces them.
   title     = {Symmetric Neural--speech Temporal Encoding for Cross-Subject
                Match--Mismatch Classification with Non-Invasive Brain Recordings},
   author    = {Zhang, Zifeng and Xu, Xiran and Yan, Yujie and Li, Songyi and
-               Zheng, Linze and Liang, Jinghua and Chen, Jing},
+               Zheng, Linze and Liang, Jinghua and Xiao, Boda and Dong, Mochu and Chen, Jing},
   booktitle = {Proc. IEEE ICASSP},
   year      = {2027}
 }
