@@ -22,8 +22,6 @@ compatible lower bounds, not a record of the original experiment environment.
 
 ## Input data
 
-This release starts from **preprocessed NumPy features**. It does not extract
-features from raw audio or brain recordings, fit PCA, or redistribute datasets.
 Obtain data from the original sources cited in the paper; PKUEEG is available at
 [OpenNeuro v1.0.3](https://openneuro.org/datasets/ds008834/versions/1.0.3).
 
