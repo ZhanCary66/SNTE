@@ -15,10 +15,7 @@ from .common import LatentCosineMatcher, Spatial64
 
 
 class BrainMagicConvSequence(nn.Module):
-    """The convolutional sequence from the reference implementation.
-
-    Residual connections, GLU gating and dilated convolutions.
-    """
+    """BrainMagic-style sequence of dilated convolutions, residuals and GLU gates."""
 
     def __init__(self, channels: list[int]) -> None:
         super().__init__()

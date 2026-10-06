@@ -1,9 +1,7 @@
-"""Final training configuration for SNTE and the five baselines.
+"""Training configurations for SNTE and the five adapted baselines.
 
-Every value here is the configuration that produced the numbers reported in
-the paper. The baselines are deliberately tuned toward their natural operating
-point: they share SNTE's speech features and, except for CCA, the same neural
-encoder search space, so the comparison isolates the match head and encoder.
+These settings are used by the release's experiment commands and are recorded
+in each run's result JSON.
 """
 
 from __future__ import annotations

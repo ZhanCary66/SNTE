@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """Data pipeline for the paper's cross-subject match--mismatch protocol.
 
-Turns the shared data directory into the "5-second window + 5 candidates
-(1 matched, 4 mismatched)" classification task. Candidate identity, order,
-labels, normalization and the train/validation/test splits follow the protocol
-used for every number in the paper.
+Loads preprocessed neural and speech arrays for five-second windows with
+five candidates (one matched, four mismatched). This module defines
+normalization, subject splits and fixed candidate plans for the release's
+training and evaluation commands.
 
 Design notes:
-- DataLoader workers only return a neural window view plus five global speech
-  indices. The candidate features themselves live in a ``speech_bank`` moved to
-  the GPU up front, so the training loop fetches them with a single
-  ``index_select`` instead of re-transferring them per sample.
-- Each window's five candidates are drawn once with a fixed seed, so the
-  candidate plan is deterministic and reproducible across runs and splits.
+- DataLoader workers return a neural window, five speech-bank indices, a label
+  and a subject index. Candidate features are moved to the selected device as
+  a ``speech_bank`` and gathered with ``index_select``.
+- A split-specific seed fixes candidate choices at construction time. The
+  same inputs, ordering and split produce the same plan across model runs.
 """
 
 from __future__ import annotations
@@ -42,7 +41,13 @@ DATASETS = ("SparKULee", "PKUEEG", "SEM4Lang")
 # Expected file counts, used to validate data integrity.
 EXPECTED_NEURAL = {"SparKULee": 662, "PKUEEG": 1250, "SEM4Lang": 720}
 EXPECTED_STIMULI = {"SparKULee": 72, "PKUEEG": 50, "SEM4Lang": 60}
-# Raw files contain 64/57/306 channels; the model receives 64/57/204 channels.
+EXPECTED_SUBJECTS = {"SparKULee": 85, "PKUEEG": 25, "SEM4Lang": 12}
+EXPECTED_SPLIT_COUNTS = {
+    "SparKULee": {"train": 54, "val": 14, "test": 17},
+    "PKUEEG": {"train": 15, "val": 5, "test": 5},
+    "SEM4Lang": {"train": 8, "val": 2, "test": 2},
+}
+# Preprocessed neural files contain 64/57/306 channels; models receive 64/57/204.
 SOURCE_NEURAL_CHANNELS = {"SparKULee": 64, "PKUEEG": 57, "SEM4Lang": 306}
 NEURAL_CHANNELS = {"SparKULee": 64, "PKUEEG": 57, "SEM4Lang": 204}
 
@@ -61,47 +66,99 @@ SEGMENT_SAMPLES = 5 * SAMPLE_RATE
 N_CANDIDATES = 5
 # Speech feature dimension: wav2vec-L14-PCA64 (64) + Mel10 (10) = 74.
 SPEECH_DIM = 74
-# Fixed seeds used to draw candidates for each split, so that the plan is
-# identical across runs.
+# Split-specific candidate seeds; identical inputs and ordering yield the same plan.
 FIXED_CANDIDATE_SEEDS = {"train": 20260801, "val": 20260802, "test": 20260803}
 # Protocol version, recorded in every result JSON.
 PROTOCOL_VERSION = "icassp_mm_v2_5s_w2v64_mel10_fixed5way_subjectsplit_sem204grad"
 
 
-def validate_shared_contract(root: Path = SHARED_ROOT) -> dict:
-    """Validate the shared data layout and return per-dataset statistics.
+def _validate_neural_records(dataset: str, paths: list[Path]) -> set[str]:
+    """Validate filename identities without opening array contents."""
+    identities: dict[int, str] = {}
+    records: set[tuple[int, str]] = set()
+    stimuli: set[str] = set()
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f"{path}: expected a neural file")
+        match = re.fullmatch(r"sub-([0-9]+)_(.+)_LP-30_64Hz\.npy", path.name)
+        if match is None:
+            raise ValueError(f"{path}: expected sub-<numeric ID>_<stimulus>_LP-30_64Hz.npy")
+        subject, stimulus = match.groups()
+        number = int(subject)
+        if not 1 <= number <= EXPECTED_SUBJECTS[dataset]:
+            raise ValueError(f"{path}: subject ID must be in 1..{EXPECTED_SUBJECTS[dataset]}")
+        if number in identities and identities[number] != subject:
+            raise ValueError(
+                f"{path}: ambiguous duplicate numeric subject ID {identities[number]!r}/{subject!r}"
+            )
+        identities[number] = subject
+        record = (number, stimulus)
+        if record in records:
+            raise ValueError(f"{path}: duplicate numeric (subject, stimulus) record {record}")
+        records.add(record)
+        stimuli.add(stimulus)
+    return stimuli
 
-    Checks that the directory exists, that all three datasets have both neural
-    and stimulus subdirectories, that the file counts match the expected ones,
-    and that the Mel and wav2vec identifiers correspond one to one.
+
+def validate_shared_contract(root: Path = SHARED_ROOT, datasets=None) -> dict:
+    """Shallow preflight for file identities, population and published split sizes.
+
+    By default all paper datasets are checked; ``datasets=(name,)`` selects one
+    dataset without requiring the other two. This does not scan array shapes or
+    prove temporal alignment: the loaders check each array when it is used.
     """
-    if not root.is_dir():
-        raise FileNotFoundError(root)
-    expected = set(DATASETS)
-    neural_sets = {p.name for p in (root / "neural_lp30_64hz").iterdir() if p.is_dir()}
-    stimulus_sets = {p.name for p in (root / "stimuli").iterdir() if p.is_dir()}
-    missing_neural = expected - neural_sets
-    missing_stimuli = expected - stimulus_sets
-    if missing_neural or missing_stimuli:
-        raise RuntimeError(
-            f"paper datasets missing: neural={missing_neural}, stimuli={missing_stimuli}"
-        )
+    root = Path(root)
+    selected = DATASETS if datasets is None else tuple(datasets)
+    if not selected or len(set(selected)) != len(selected) or any(name not in DATASETS for name in selected):
+        raise ValueError(f"datasets must contain distinct names from {DATASETS}")
+    for directory in (root, root / "neural_lp30_64hz", root / "stimuli"):
+        if not directory.is_dir():
+            raise FileNotFoundError(f"missing data directory: {directory}")
     report = {}
-    for dataset in DATASETS:
-        neural = sorted((root / "neural_lp30_64hz" / dataset).glob("*.npy"))
-        mel = sorted((root / "stimuli" / dataset / "mel10_64Hz").glob("*.npy"))
-        wav = sorted((root / "stimuli" / dataset / "wav2vec_l14_pca64_64Hz").glob("*.npy"))
+    for dataset in selected:
+        neural_dir = root / "neural_lp30_64hz" / dataset
+        mel_dir = root / "stimuli" / dataset / "mel10_64Hz"
+        wav_dir = root / "stimuli" / dataset / "wav2vec_l14_pca64_64Hz"
+        for directory in (neural_dir, mel_dir, wav_dir):
+            if not directory.is_dir():
+                raise FileNotFoundError(f"missing data directory: {directory}")
+        neural = sorted(neural_dir.glob("*.npy"))
+        mel = sorted(mel_dir.glob("*.npy"))
+        wav = sorted(wav_dir.glob("*.npy"))
+        neural_stimuli = _validate_neural_records(dataset, neural)
+        mel_stimuli = {path.stem for path in mel}
+        wav_stimuli = {path.stem for path in wav}
+        if any(not path.is_file() for path in (*mel, *wav)):
+            raise ValueError(f"{dataset}: stimulus entries must be files")
+        if mel_stimuli != wav_stimuli:
+            raise RuntimeError(f"{dataset}: Mel/wav2vec identifiers differ")
+        if neural_stimuli != mel_stimuli:
+            raise RuntimeError(
+                f"{dataset}: neural/stimulus identifiers differ: "
+                f"missing speech={sorted(neural_stimuli - mel_stimuli)}, "
+                f"unused speech={sorted(mel_stimuli - neural_stimuli)}"
+            )
         if len(neural) != EXPECTED_NEURAL[dataset]:
             raise RuntimeError(
                 f"{dataset}: {len(neural)} neural files, expected {EXPECTED_NEURAL[dataset]}"
             )
         if len(mel) != EXPECTED_STIMULI[dataset] or len(wav) != len(mel):
             raise RuntimeError(f"{dataset}: invalid stimulus counts mel={len(mel)} wav={len(wav)}")
-        if {p.stem for p in mel} != {p.stem for p in wav}:
-            raise RuntimeError(f"{dataset}: Mel/wav2vec identifiers differ")
+        subjects = {subject_id(path) for path in neural}
+        numbers = {int(subject) for subject in subjects}
+        expected = set(range(1, EXPECTED_SUBJECTS[dataset] + 1))
+        if numbers != expected:
+            raise RuntimeError(f"{dataset}: incomplete subject population; missing={sorted(expected - numbers)}")
+        split_counts = {split: 0 for split in FIXED_CANDIDATE_SEEDS}
+        for subject in subjects:
+            split_counts[_fixed_split_number(dataset, subject)] += 1
+        if split_counts != EXPECTED_SPLIT_COUNTS[dataset]:
+            raise RuntimeError(f"{dataset}: invalid fixed split counts {split_counts}")
         report[dataset] = {
             "neural": len(neural),
             "stimuli": len(mel),
+            "subjects": len(subjects),
+            "split_subject_counts": split_counts,
             "source_channels": SOURCE_NEURAL_CHANNELS[dataset],
             "model_channels": NEURAL_CHANNELS[dataset],
         }
@@ -155,6 +212,32 @@ def _fixed_split_number(dataset: str, subject: str) -> str:
 _RANDOM_MAPPING: dict[str, dict[str, str]] = {}
 
 
+def all_subjects(dataset: str, root: Path = SHARED_ROOT) -> list[str]:
+    """Every subject ID of one dataset, sorted numerically."""
+    return sorted(
+        {subject_id(p) for p in (root / "neural_lp30_64hz" / dataset).glob("*.npy")}, key=int
+    )
+
+
+def test_subjects(
+    dataset: str, split_seed: int | None = None, root: Path = SHARED_ROOT
+) -> list[str]:
+    """Return nominal test-split IDs sorted numerically (legacy helper).
+
+    This is NOT the positional accuracy mapping: ``MatchMismatchDataset`` uses
+    lexicographically sorted IDs of subjects with actual windows. Results must
+    use the saved ``unit_names`` from that dataset instead of this list.
+    """
+    if split_seed is None:
+        mapping = {
+            subject: _fixed_split_number(dataset, subject)
+            for subject in all_subjects(dataset, root)
+        }
+    else:
+        mapping = random_subject_splits(dataset, split_seed, root)
+    return sorted((subject for subject, split in mapping.items() if split == "test"), key=int)
+
+
 def random_subject_splits(
     dataset: str, split_seed: int, root: Path = SHARED_ROOT
 ) -> dict[str, str]:
@@ -162,9 +245,7 @@ def random_subject_splits(
 
     The split sizes are identical to the fixed split.
     """
-    subjects = sorted(
-        {subject_id(p) for p in (root / "neural_lp30_64hz" / dataset).glob("*.npy")}, key=int
-    )
+    subjects = all_subjects(dataset, root)
     counts = {"train": 0, "val": 0, "test": 0}
     for subject in subjects:
         counts[_fixed_split_number(dataset, subject)] += 1
@@ -206,11 +287,12 @@ def split_name(dataset: str, path: Path) -> str:
 
 
 def _zscore(array: np.ndarray) -> np.ndarray:
-    """Standardize along the feature axis: z = (x - mean) / (std + 1e-6)."""
-    array = np.asarray(array, dtype=np.float32)
-    mean = array.mean(axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
-    std = array.std(axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
-    return ((array - mean) / np.maximum(std, np.float32(1e-6))).astype(np.float32, copy=False)
+    """Feature-wise z-score along time with a population std and 1e-6 floor."""
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        array = np.asarray(array, dtype=np.float32)
+        mean = array.mean(axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
+        std = array.std(axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
+        return ((array - mean) / np.maximum(std, np.float32(1e-6))).astype(np.float32, copy=False)
 
 
 def _load_neural(
@@ -234,11 +316,16 @@ def _load_neural(
         raise ValueError(
             f"{path}: neither dimension matches {source_channels} channels: {value.shape}"
         )
+    if value.shape[0] == 0:
+        raise ValueError(f"{path}: empty neural signal")
     if channel_indices is not None:
         value = value[:, channel_indices]
     if not np.isfinite(value).all():
         raise ValueError(f"{path}: non-finite neural values")
-    return _zscore(value)
+    normalized = _zscore(value)
+    if not np.isfinite(normalized).all():
+        raise ValueError(f"{path}: non-finite normalized neural values")
+    return normalized
 
 
 def _load_speech(mel_path: Path, wav_path: Path) -> np.ndarray:
@@ -255,9 +342,13 @@ def _load_speech(mel_path: Path, wav_path: Path) -> np.ndarray:
         raise ValueError(
             f"unaligned speech features: {mel_path} {mel.shape}, {wav_path} {wav.shape}"
         )
+    if mel.shape[0] == 0:
+        raise ValueError(f"{mel_path}, {wav_path}: empty speech signal")
+    if not np.isfinite(mel).all() or not np.isfinite(wav).all():
+        raise ValueError(f"{mel_path}, {wav_path}: non-finite speech values")
     speech = np.concatenate([_zscore(wav), _zscore(mel)], axis=1)
     if not np.isfinite(speech).all():
-        raise ValueError(f"{mel_path}: non-finite speech values")
+        raise ValueError(f"{mel_path}, {wav_path}: non-finite normalized speech values")
     return speech.astype(np.float32, copy=False)
 
 
@@ -293,16 +384,21 @@ class MatchMismatchDataset(Dataset):
         root: Path = SHARED_ROOT,
         max_files: int = 0,
         max_segments: int = 0,
+        require_all_subjects: bool = False,
     ) -> None:
         # max_files / max_segments trim the data for quick smoke tests.
         if dataset not in DATASETS or split not in FIXED_CANDIDATE_SEEDS:
             raise ValueError((dataset, split))
+        for name, limit in (("max_files", max_files), ("max_segments", max_segments)):
+            if isinstance(limit, bool) or not isinstance(limit, (int, np.integer)) or limit < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+        root = Path(root)
         source_channels = SOURCE_NEURAL_CHANNELS[dataset]
         channel_indices = SEM4LANG_CHANNEL_INDICES if dataset == "SEM4Lang" else None
-        neural_paths = [
-            p for p in sorted((root / "neural_lp30_64hz" / dataset).glob("*.npy"))
-            if split_name(dataset, p) == split
-        ]
+        paths = sorted((root / "neural_lp30_64hz" / dataset).glob("*.npy"))
+        _validate_neural_records(dataset, paths)
+        neural_paths = [p for p in paths if split_name(dataset, p) == split]
+        planned_subjects = {subject_id(path) for path in neural_paths}
         if max_files:
             neural_paths = neural_paths[:max_files]
         if not neural_paths:
@@ -332,6 +428,12 @@ class MatchMismatchDataset(Dataset):
                 )
         if max_segments:
             self.segments = self.segments[:max_segments]
+        actual_subjects = {segment.subject for segment in self.segments}
+        if require_all_subjects and actual_subjects != planned_subjects:
+            raise RuntimeError(
+                f"{dataset}/{split}: planned subjects without five-second windows: "
+                f"{sorted(planned_subjects - actual_subjects)}"
+            )
         if not self.segments:
             raise RuntimeError(f"no five-second segments for {dataset}/{split}")
         self.dataset = dataset
@@ -354,9 +456,7 @@ class MatchMismatchDataset(Dataset):
             segments = value[: count * SEGMENT_SAMPLES].reshape(count, SEGMENT_SAMPLES, SPEECH_DIM)
             self.speech_segments[stem] = torch.from_numpy(segments)
 
-        # Build the candidate plan. This reproduces the baseline code's random
-        # draw exactly, but pays the Python/NumPy cost once instead of per
-        # sample, per worker and per epoch.
+        # Build candidate choices once, using the split seed and sample index.
         count = len(self.segments)
         candidate_plan = np.empty((count, N_CANDIDATES), dtype=np.int64)
         labels = np.empty(count, dtype=np.int64)
@@ -409,9 +509,8 @@ class MatchMismatchDataset(Dataset):
     def __getitem__(self, index: int):
         """One sample: neural window, five global candidate indices, label, subject index.
 
-        The candidate features themselves are not returned here; the training
-        loop gathers them from the GPU-resident speech bank to maximize
-        throughput.
+        Candidate features are gathered by the training loop from the speech
+        bank on the selected device; workers return only their indices.
         """
         record = self.segments[index]
         neural = self.neural[record.trial][record.start : record.start + SEGMENT_SAMPLES]
@@ -428,15 +527,19 @@ def build_splits(
     integration: bool = False,
     root: Path = SHARED_ROOT,
     split_seed: int | None = None,
+    require_all_subjects: bool = False,
 ):
     """Build the train / validation / test splits of one dataset.
 
     ``integration=True`` loads only a couple of files and segments for a quick
     smoke test. ``split_seed=None`` uses the paper's fixed split; an integer
-    selects the corresponding random cross-subject re-partition.
+    selects the corresponding random cross-subject re-partition. Formal CLI
+    runs pass ``require_all_subjects=True``; direct callers default to allowing
+    subsets, as before.
     """
     configure_split_seed(split_seed, root)
     kwargs = {"max_files": 2, "max_segments": 12} if integration else {}
+    kwargs["require_all_subjects"] = require_all_subjects
     return {
         split: MatchMismatchDataset(dataset, split, root=root, **kwargs)
         for split in ("train", "val", "test")

@@ -1,11 +1,9 @@
-"""Linear temporal-filtering baseline (CCA).
+"""CCA-style temporal-filtering adapter for the five-way matching task.
 
-CCA is essentially a linear projection. Adapted to the shared matching
-mechanism, it keeps its 33-tap linear temporal filter as the neural encoder:
-the filter maps the neural signal into the latent space, and the resulting
-features are matched against the candidates with the same latent cosine
-matcher as every other baseline. The baseline thus stays linear (no
-non-linearity), while the matching mechanism is identical across baselines.
+The neural encoder is a 33-tap linear convolution. It is paired with the
+learned speech encoder and learned-temperature, time-mean cosine matcher used
+by the other adapted baselines. Only the neural encoder is linear; this module
+does not solve the classical CCA optimization problem.
 """
 
 from __future__ import annotations

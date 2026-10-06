@@ -1,11 +1,9 @@
-"""Eeg2Vec + Conformer baseline.
+"""Eeg2Vec-based adapter with a Transformer/Conformer neural encoder.
 
-Based on Eeg2VecConformerMatcher. The original model couples masked-
-reconstruction self-supervised pretraining with a speech Conformer; here only
-its EEG encoding backbone is kept (linear projection -> two Transformer layers
--> two Conformer blocks) as the neural encoder. The reconstruction head is
-dropped, the speech side uses the shared speech encoder, and matching is the
-shared per-time-step cosine.
+Window-standardized neural features pass through a linear projection, two
+Transformer layers and two Conformer blocks. The speech branch and time-mean
+cosine matcher are shared with the other adapted baselines. This task adapter
+does not implement masked-reconstruction pretraining.
 """
 
 from __future__ import annotations
@@ -58,10 +56,8 @@ class Eeg2VecSpatial64Encoder(nn.Module):
 
     def __init__(self, input_channels: int, output_dim: int, dropout: float = 0.0) -> None:
         super().__init__()
-        # Window-level per-channel z-score + Linear + LayerNorm, the same input
-        # stage used by BrainMagic and ConvConcatNet. The MEG recordings are
-        # stored at ~1e-11 and can only be used by a deep model after window
-        # standardization.
+        # Window-level per-channel z-score + Linear + LayerNorm, the same
+        # input adapter used by BrainMagic and ConvConcatNet.
         self.spatial64 = Spatial64(input_channels, standardize=True)
         self.eeg_feature = nn.Sequential(
             nn.Linear(64, output_dim), nn.LayerNorm(output_dim), nn.GELU()

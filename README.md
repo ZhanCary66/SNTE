@@ -1,141 +1,181 @@
 # SNTE — Symmetric Neural–speech Temporal Encoding
 
-Code for the paper *"Symmetric Neural–speech Temporal Encoding for Cross-Subject
-Match–Mismatch Classification with Non-Invasive Brain Recordings."*
+Code for *Symmetric Neural–speech Temporal Encoding for Cross-Subject
+Match–Mismatch Classification with Non-Invasive Brain Recordings*.
 
-SNTE performs five-way match–mismatch classification: given a 5-second neural
-window (EEG or MEG) and five candidate speech segments, it identifies the
-segment the participant actually heard. The model applies the same sequence of
-dilated convolutions — kernel size 3, dilations (1, 3, 9) — to both modalities
-with **separate parameters**, then scores each candidate from multi-statistic
-correlation descriptors in the shared latent space.
-
-## Repository layout
-
-| File | Contents |
-|---|---|
-| `model.py` | SNTE: symmetric dilated encoders and the correlation scorer |
-| `baselines/` | The five baselines compared in the paper |
-| `dataset.py` | Data pipeline, fixed split and random cross-subject splits |
-| `config.py` | Final hyperparameters of SNTE and every baseline |
-| `main.py` | Training / evaluation entry point |
-| `run_paper.py` | Emits the exact commands behind Tables 1–3 |
-| `collect_results.py` | Aggregates result JSONs into the paper's tables |
+Given a five-second EEG or MEG window and five speech candidates, SNTE outputs
+five matching scores. Neural and speech encoders use the same convolutional
+structure with separate parameters. The scorer combines time-mean products,
+time-maximum products and time-mean absolute differences of normalized features.
 
 ## Installation
 
+Use Python 3.10 or newer:
+
 ```bash
-pip install -r requirements.txt   # torch, numpy
+pip install -r requirements.txt
 ```
 
-Training requires a CUDA GPU; a CPU run is only possible with `--integration`.
+Formal training requires a CUDA device supporting bfloat16. CPU execution is
+available for the small `--integration` check. Dependency constraints are
+compatible lower bounds, not a record of the original experiment environment.
 
-## Data
+## Input data
 
-The datasets are not redistributed here; obtain them from their original
-sources (see the paper for details). `dataset.py` expects this layout:
+This release starts from **preprocessed NumPy features**. It does not extract
+features from raw audio or brain recordings, fit PCA, or redistribute datasets.
+Obtain data from the original sources cited in the paper; PKUEEG is available at
+[OpenNeuro v1.0.3](https://openneuro.org/datasets/ds008834/versions/1.0.3).
 
-```
+```text
 $SNTE_DATA_ROOT/
 ├── neural_lp30_64hz/<dataset>/sub-<id>_<stimulus>_LP-30_64Hz.npy
 └── stimuli/<dataset>/
-    ├── mel10_64Hz/<stimulus>.npy                   # [T, 10]
-    └── wav2vec_l14_pca64_64Hz/<stimulus>.npy       # [T, 64]
+    ├── wav2vec_l14_pca64_64Hz/<stimulus>.npy   # [T, 64]
+    └── mel10_64Hz/<stimulus>.npy              # [T, 10]
 ```
 
-with `<dataset>` one of `SparKULee`, `PKUEEG`, `SEM4Lang`. Point
-`SNTE_DATA_ROOT` at it (defaults to `./data/ICASSP_shared_v1`), then check the
-layout:
+Directory names are `SparKULee`, `PKUEEG` and `SEM4Lang`. The final paper uses
+`SparrKULee` and `SMN4Lang` in its text; Figure 2 uses `SEM4Lang`. These names
+refer to the corresponding directory datasets; do not rename the directories.
+
+Neural arrays have 64, 57 or 306 channels, respectively; time-by-channel and
+channel-by-time layouts are accepted. SEM4Lang uses the 204 planar-gradiometer
+channels. Both modalities must already be time-aligned and sampled at 64 Hz.
+Speech inputs concatenate wav2vec-L14-PCA64 before Mel10, after separate
+stimulus-wise z-scores. Neural inputs receive recording-wise channel z-scores
+and, where enabled by the model, window-wise z-scores.
+
+Only complete, non-overlapping 320-sample windows within both recordings are
+used. Each positive speech window is paired with four other windows from the
+same stimulus. If fewer than four distinct negative windows exist, sampling is
+with replacement. Candidate plans use fixed split-specific seeds.
 
 ```bash
 export SNTE_DATA_ROOT=/path/to/ICASSP_shared_v1
 python main.py --dataset SparKULee --check-data
 ```
 
-The 74-dimensional speech input is the concatenation of the PCA-reduced
-wav2vec 2.0 layer-14 features (64) and a Mel spectrum (10), both at 64 Hz.
+The layout check covers the selected dataset's file counts, identities and
+stimulus correspondence. Array shape and finite-value checks also run during
+loading; these checks cannot establish the correctness of upstream alignment.
 
-## Quick start
+## Training and evaluation
 
 ```bash
-# smoke test: tiny subset, CPU, no GPU needed
-python main.py --model snte --dataset SparKULee --integration --device cpu
+# One-epoch pipeline check on a small subset of the supplied input data
+python main.py --model snte --dataset SparKULee --integration --device cpu --workers 0
 
-# one real run (fixed split, training seed 0)
+# Fixed cross-subject split, training seed 0
 python main.py --model snte --dataset SparKULee --seed 0
 
-# model-only forward check
-python model.py     # prints the output shape and parameter count
+# One random subject repartition
+python main.py --model snte --dataset SparKULee --seed 2 --split-seed 101
 ```
 
-## Reproducing the paper
+`config.py` contains model-specific dimensions, dropout and training settings.
+`main.py` selects the checkpoint by validation subject-macro accuracy, breaking
+ties by validation loss, and then evaluates the selected checkpoint on test.
+Results contain metrics, effective configuration and ordered subject mappings;
+checkpoints use a separate `.pt` file. Existing outputs are not overwritten.
+Use `--data-root` and `--output /path/to/run.json` to select explicit locations.
+Integration results are marked separately and excluded from paper aggregation.
 
-`run_paper.py` knows the exact configuration of every reported run.
+## Paper experiments
 
-| Table | Runs | Protocol |
-|---|---|---|
-| 1 — main results | 6 models × 3 datasets × 5 splits | 5 random cross-subject splits, training seed 2 |
-| 2 — match head | 3 heads × 3 datasets × 5 splits | same 5 splits |
-| 3 — component ablation | 6 variants × 3 datasets × 3 seeds | fixed split |
+| Entry | Protocol |
+|---|---|
+| Table 1 | Six models, three datasets, repartition seeds 101–105; training seed 2 |
+| Table 2 | Three SNTE scoring heads under the same five repartitions |
+| Table 3 | Six components/variants on the fixed split; training seeds 0–2 |
+| Figure 2 | The nine Table 3/full results, with 17/5/2 test subjects |
 
 ```bash
-python run_paper.py --table all --emit sh          # print every command
-python run_paper.py --table 3 --emit slurm         # write slurm/ scripts
-python collect_results.py                          # print the three tables
+# Print commands; this does not run or submit jobs
+python run_paper.py --table all --emit sh --data-root "$SNTE_DATA_ROOT" --output-root /path/to/results
+
+# Alternatively generate Slurm scripts; select a partition for your cluster
+python run_paper.py --table 3 --emit slurm --partition YOUR_PARTITION --data-root "$SNTE_DATA_ROOT" --output-root /path/to/results
+
+python collect_results.py --results /path/to/results
+python analyze_results.py --results /path/to/results
+python plot_fig2.py --results /path/to/results --output /path/to/figure2.png --csv /path/to/figure2.csv
 ```
 
-189 runs in total, roughly 30 GPU-hours on an A800. For a single-GPU machine,
-run the emitted commands sequentially; each writes
-`results/<table>/<label>/<dataset>_seed<seed>.json`.
+There are 174 unique training jobs covering 189 table references: Table 2/perstat
+reuses Table 1/SNTE. The loaders also accept the historical Table 2/perstat path;
+if both copies exist, their scientific metadata and results must agree.
+`--table` and `--datasets` select subsets for command generation, collection and
+analysis. Collection and analysis reject missing, invalid or integration runs.
+`collect_results.py --partial` reports coverage only, not an incomplete table.
 
-> The main-results row for SNTE and the `perstat` row of the match-head table
-> are the *same* configuration (`snte_split<N>` and `perstat_split<N>`), so one
-> set of runs covers both; the original campaign ran it once.
+The five repartitions are not disjoint k-folds; the same subject can be tested
+more than once. Table 1's nominal Wilcoxon comparisons use subject–repartition
+observations. Head comparisons average repeated differences per subject before
+pooling; fixed-split component comparisons average over training seeds per
+subject. The analyzer labels these conventions separately. Averaging repeated
+observations does not remove all dependence from shared training or overlapping
+partitions. Figure 2 uses subject three-seed means, IQR/median boxes, min–max
+whiskers of those means, and each subject's seed range.
 
-### A note on the splits
+### Older result files
 
-The "5 random cross-subject splits" (split seeds 101–105) are **independent
-random re-partitions**, not the disjoint folds of a k-fold cross-validation:
-each seed shuffles the participants and re-applies the same per-split subject
-counts as the fixed split, so the test sets of two seeds overlap and the same
-participant may be tested under several seeds. Keep this in mind when pooling
-per-subject results across seeds — for the paper's statistics, repeated
-observations of one participant were collapsed to a single value first.
+New results include `split_unit_names` and `candidate_seeds`. Legacy results
+without identity or architecture metadata need an explicit `--subject-map` JSON
+for collection, analysis and plotting. Its keys are paths relative to the results
+root, and each entry supplies the missing known metadata:
 
-## Results
+```json
+{
+  "table3/full/PKUEEG_seed0.json": {
+    "split_unit_names": {"train": ["..."], "val": ["..."], "test": ["..."]},
+    "architecture": {"...": "actual recorded architecture fields"}
+  }
+}
+```
 
-Test subject-macro accuracy (%), chance level 20%, mean ± std over the 5 random
-cross-subject splits:
+Replace the placeholders with complete, lexicographically ordered actual IDs
+and the architecture fields defined in `results_io.py`. Conflicts with recorded
+identities or SNTE settings are rejected. The known schema-0 default baseline
+architecture bookkeeping error may be corrected only to the executed baseline
+architecture, with a nonempty `provenance` string explaining the source.
+Overlays do not modify files or authorize replacing differing hyperparameters.
+No raw data or checkpoint is required to analyze self-describing results.
 
-| Model | SparrKULee | PKUEEG | SEM4Lang |
-|---|---:|---:|---:|
-| **SNTE** | **71.43 ± 3.78** | **56.58 ± 7.23** | **79.93 ± 5.75** |
-| Eeg2Vec | 68.44 ± 3.68 | 54.76 ± 7.83 | 73.86 ± 5.28 |
-| CCA | 66.42 ± 3.29 | 52.31 ± 5.24 | 71.00 ± 5.57 |
-| ConvConcatNet | 66.02 ± 3.93 | 52.97 ± 6.39 | 70.32 ± 5.26 |
-| VLAAI | 65.71 ± 3.41 | 54.09 ± 6.93 | 73.69 ± 6.08 |
-| BrainMagic | 60.19 ± 6.37 | 52.89 ± 6.04 | 74.86 ± 7.04 |
+## Implementation scope
 
-SNTE ranks first on all 15 split–dataset combinations and has 1.61M parameters
-(SparrKULee), against 4.48M for ConvConcatNet and 6.43M for BrainMagic.
+The baselines are adaptations to this five-way task, using a shared time-mean
+cosine matcher and model-specific dimensions and regularization. CCA denotes a
+33-tap linear neural encoder with a learned speech encoder, not a closed-form
+CCA solver. Window normalization is enabled in the four other adapted baselines.
+The three heads and six component variants are defined in `run_paper.py`.
 
-## Configuration
+Validation-based checkpoint selection describes a single training run. Historical
+training-seed and some baseline-setting choices considered fixed-split test
+performance and relative performance margins; this is not a validation-only
+hyperparameter-selection protocol. Release settings should be checked against
+original run metadata when verifying historical numbers: fixed-split
+ConvConcatNet logs differ from the released dimension/dropout configuration,
+and the final repartition configuration is not established by those logs.
 
-`config.py` holds the final hyperparameters: SNTE uses `embed_dim=256`,
-`dropout=0.5`, and AdamW with learning rate `1e-3`, weight decay `1e-2`,
-50 epochs, batch size 64 and early-stopping patience 10. 
+`config.py` defines SNTE with `embed_dim=256`, `dropout=0.5`, and AdamW with
+learning rate `1e-3`, weight decay `1e-2`, up to 50 epochs, batch size 64 and
+early-stopping patience 10.
 
-The architecture switches in `main.py` (`--head`, `--no-standardize`,
-`--neural-encoder`, `--speech-encoder`, `--tied-encoder`,
-`--neural-dilations`, `--speech-dilations`) reproduce the paper's ablations.
-Their defaults are the reported model.
+Seeds are recorded, but cuDNN benchmark mode and nondeterministic algorithms are
+enabled. Identical numerical results across environments are not guaranteed.
+The tests below use synthetic inputs and do not verify the paper's accuracies.
 
-One implementation detail worth flagging: the scorer still builds its
-learned temperature and the per-lag attention layer even though the paper's
-configuration uses a single scale and a single lag. This is deliberate — it
-keeps the module creation order, and therefore the parameter count (1.61M) and
-the seeded initialization, identical to the code that produced the reported
-numbers, so a rerun with the same seed reproduces them.
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Tests cover model/data behavior, invalid inputs, output protection, result
+identity and completeness, statistical pairing, experiment reuse and Figure 2.
+The before-change fixture is version-bound; incompatible numerical checks are
+explicitly skipped rather than treated as passed.
 
 ## Citation
 
@@ -144,7 +184,8 @@ numbers, so a rerun with the same seed reproduces them.
   title     = {Symmetric Neural--speech Temporal Encoding for Cross-Subject
                Match--Mismatch Classification with Non-Invasive Brain Recordings},
   author    = {Zhang, Zifeng and Xu, Xiran and Yan, Yujie and Li, Songyi and
-               Zheng, Linze and Liang, Jinghua and Xiao, Boda and Dong, Mochu and Chen, Jing},
+               Zheng, Linze and Liang, Jinghua and Xiao, Boda and Dong, Mochu and
+               Chen, Jing},
   booktitle = {Proc. IEEE ICASSP},
   year      = {2027}
 }

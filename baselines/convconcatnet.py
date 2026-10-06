@@ -67,9 +67,9 @@ class ConvConcatExtractor(nn.Module):
 class ConvConcatNetDecoder(nn.Module):
     """The full ConvCatNetSameLarge shared body (without the subject matrix).
 
-    Six refinement iterations: the base features, the current value and the
-    attention-weighted value are concatenated and passed through the extractor,
-    then refined by a context convolution and a self-attention gate.
+    By default, six refinement iterations concatenate the base features,
+    current value and gated value, pass them through the extractor, and apply
+    a context convolution and a pointwise learned gate.
     """
 
     def __init__(
@@ -83,7 +83,7 @@ class ConvConcatNetDecoder(nn.Module):
         # Context convolution: a 49-step receptive field (~0.77 s).
         self.context = nn.Conv1d(width, width, 49, padding="same")
         self.context_norm = nn.LayerNorm(width)
-        # Self-attention gate: value * attention(value).
+        # Pointwise learned gate: value * attention(value).
         self.attention = nn.Sequential(
             nn.Linear(width, width), nn.LeakyReLU(), nn.Linear(width, width)
         )

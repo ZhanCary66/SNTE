@@ -1,9 +1,9 @@
 """VLAAI baseline: convolutional extractor plus context convolutions.
 
-Based on the VLAAIDecoder, adapted to serve as the neural encoder of the
-shared latent cosine matcher: four rounds of "extractor (five dilated
-convolutions) + context convolution", with a residual connection to the base
-branch and GroupNorm for stable training.
+The neural adapter performs four rounds of an extractor with five 8-tap
+convolutions followed by a context convolution. Each extractor receives the
+sum of the current features and the base branch. GroupNorm and LeakyReLU are
+applied before the shared latent cosine matcher.
 """
 
 from __future__ import annotations
@@ -46,8 +46,7 @@ class VLAAISpatial64Encoder(nn.Module):
     ) -> None:
         super().__init__()
         self.rounds = rounds
-        # Window-level z-score plus a linear projection to 64 channels, which
-        # is what makes the tiny-scale MEG recordings usable.
+        # Window-level z-score, projection to 64 channels and LayerNorm.
         self.spatial64 = Spatial64(input_channels, standardize=True)
         self.input = nn.Conv1d(64, output_dim, 1)
         self.extractor = VlaaiExtractor(output_dim, width_scale)

@@ -9,8 +9,9 @@ All baselines share the same matching mechanism, :class:`LatentCosineMatcher`:
 - the cosine similarity between the two modalities is computed at every time
   step and averaged over time to produce the score.
 
-This keeps the comparison fair: the matching mechanism is identical across all
-baselines, so the only difference is the neural encoding architecture.
+These are adaptations to a shared match--mismatch task, not complete original
+baseline systems. CCA omits window standardization; the other four baselines
+include it in their neural adapters.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from model import DilatedEncoder
+from model import DilatedEncoder, validate_match_inputs
 
 
 class Spatial64(nn.Module):
@@ -78,11 +79,19 @@ class LatentCosineMatcher(nn.Module):
         speech_channels: int,
         embed_dim: int,
         dropout: float = 0.0,
+        neural_channels: int | None = None,
     ) -> None:
         super().__init__()
         self.neural_body = neural_body
-        # The speech encoder matches SNTE's architecture to keep the
-        # comparison fair.
+        if neural_channels is None:
+            first = next((layer for layer in neural_body.modules()
+                          if isinstance(layer, (nn.Conv1d, nn.Linear))), None)
+            if first is None:
+                raise ValueError("neural_channels is required for a body without an input projection")
+            neural_channels = first.in_channels if isinstance(first, nn.Conv1d) else first.in_features
+        self.neural_channels = int(neural_channels)
+        self.speech_channels = int(speech_channels)
+        # The speech encoder uses the published SNTE dilated architecture.
         self.speech_encoder = DilatedEncoder(speech_channels, embed_dim, dropout)
         # Learned temperature (initialized to e^ln10 ~ 10) scaling the cosine.
         self.temperature = nn.Parameter(torch.tensor(math.log(10.0)))
@@ -93,6 +102,7 @@ class LatentCosineMatcher(nn.Module):
         - candidates: [B, N, T, 74] features of the N candidates.
         Output: matching scores [B, N].
         """
+        validate_match_inputs(neural, candidates, self.neural_channels, self.speech_channels)
         batch, count, time, channels = candidates.shape
         neural_feat = self.neural_body(neural)                        # [B, T, E]
         # All candidates share the speech encoder.
