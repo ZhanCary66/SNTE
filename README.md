@@ -33,10 +33,6 @@ $SNTE_DATA_ROOT/
     └── mel10_64Hz/<stimulus>.npy              # [T, 10]
 ```
 
-Directory names are `SparKULee`, `PKUEEG` and `SEM4Lang`. The final paper uses
-`SparrKULee` and `SMN4Lang` in its text; Figure 2 uses `SEM4Lang`. These names
-refer to the corresponding directory datasets; do not rename the directories.
-
 Neural arrays have 64, 57 or 306 channels, respectively; time-by-channel and
 channel-by-time layouts are accepted. SEM4Lang uses the 204 planar-gradiometer
 channels. Both modalities must already be time-aligned and sampled at 64 Hz.
